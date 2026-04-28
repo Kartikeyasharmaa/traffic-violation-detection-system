@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Traffic Violation Detection Dashboard</title>
+    <link rel="stylesheet" href="/frontend/style.css">
+</head>
+<body>
+    <div class="ambient-orb orb-one"></div>
+    <div class="ambient-orb orb-two"></div>
+    <div class="ambient-orb orb-three"></div>
+    <div class="page-shell">
+        <header class="hero reveal reveal-hero">
+            <div class="hero-copy">
+                <p class="eyebrow">Traffic Control Console</p>
+                <h1>Traffic Violation Dashboard</h1>
+                <p class="subtitle">
+                    Monitor helmet violations, red-light jumping, and wrong-side driving from one clean admin console with India-time records.
+                </p>
+            </div>
+            <div class="hero-side">
+                <div class="hero-chip hero-chip-live">
+                    <span class="badge-dot"></span>
+                    <span>Auto refresh every 4s</span>
+                </div>
+                <div class="hero-chip">Timezone: IST</div>
+                <div class="hero-chip">Storage: SQLite</div>
+            </div>
+        </header>
+
+        <section class="detector-panel panel reveal reveal-panel">
+            <div class="records-topbar detector-topbar">
+                <div>
+                    <p class="panel-title">Launch Detectors</p>
+                    <p class="panel-subtitle">Start each video-based detector directly from the dashboard. The model window will open automatically on your system.</p>
+                </div>
+                <div class="records-meta">
+                    <span class="meta-pill">One click start</span>
+                    <span class="meta-pill">Project sample videos</span>
+                </div>
+            </div>
+
+            <div class="detector-grid">
+                <article class="detector-card detector-helmet">
+                    <p class="detector-kicker">Helmet</p>
+                    <h3>No Helmet Detection</h3>
+                    <p class="detector-copy">Runs the provided helmet violation video with rider, head, and number plate annotations.</p>
+                    <div class="detector-actions">
+                        <button id="startHelmetButton" class="launch-button">Start Helmet Video</button>
+                        <span id="helmetDetectorStatus" class="detector-status idle">Idle</span>
+                    </div>
+                </article>
+
+                <article class="detector-card detector-red">
+                    <p class="detector-kicker">Red Light</p>
+                    <h3>Red Light Jumping</h3>
+                    <p class="detector-copy">Runs the red-light violation video with stop-line, vehicle tracking, and plate extraction.</p>
+                    <div class="detector-actions">
+                        <button id="startRedLightButton" class="launch-button">Start Red Light Video</button>
+                        <span id="redLightDetectorStatus" class="detector-status idle">Idle</span>
+                    </div>
+                </article>
+
+                <article class="detector-card detector-wrong">
+                    <p class="detector-kicker">Wrong Side</p>
+                    <h3>Wrong Side Driving</h3>
+                    <p class="detector-copy">Runs the wrong-side driving video with direction guidance, vehicle frames, and evidence saving.</p>
+                    <div class="detector-actions">
+                        <button id="startWrongSideButton" class="launch-button">Start Wrong Side Video</button>
+                        <span id="wrongSideDetectorStatus" class="detector-status idle">Idle</span>
+                    </div>
+                </article>
+            </div>
+        </section>
+
+        <section class="stats-grid reveal reveal-stats" id="statsGrid">
+            <article class="stat-card accent-total" style="--card-delay: 0.02s;">
+                <p class="stat-kicker">Total Violations</p>
+                <h2 id="totalViolations">0</h2>
+                <span class="stat-note">All recorded evidence</span>
+            </article>
+            <article class="stat-card accent-helmet" style="--card-delay: 0.10s;">
+                <p class="stat-kicker">Helmet</p>
+                <h2 id="helmetViolations">0</h2>
+                <span class="stat-note">No-helmet rider cases</span>
+            </article>
+            <article class="stat-card accent-red" style="--card-delay: 0.18s;">
+                <p class="stat-kicker">Red Light</p>
+                <h2 id="redLightViolations">0</h2>
+                <span class="stat-note">Stop-line violations</span>
+            </article>
+            <article class="stat-card accent-wrong" style="--card-delay: 0.26s;">
+                <p class="stat-kicker">Wrong Side</p>
+                <h2 id="wrongSideViolations">0</h2>
+                <span class="stat-note">Opposite direction vehicles</span>
+            </article>
+        </section>
+
+        <section class="panel records-panel reveal reveal-panel">
+            <div class="records-topbar">
+                <div>
+                    <p class="panel-title">Violation Records</p>
+                    <p class="panel-subtitle">Latest first. Filter by violation type, open evidence frames, and manage saved records from one table.</p>
+                </div>
+                <div class="records-meta">
+                    <span id="liveStatus" class="status-pill">Auto refresh every 4s</span>
+                    <span id="lastUpdated" class="meta-pill">Waiting for first sync</span>
+                </div>
+            </div>
+
+            <div class="controls-panel">
+                <div class="controls-copy">
+                    <p class="controls-title">Filter And Refresh</p>
+                    <p class="controls-subtitle">Use the dropdown to focus on a single violation type.</p>
+                </div>
+                <div class="controls">
+                    <label class="filter-group" for="typeFilter">
+                        <span>Filter</span>
+                        <select id="typeFilter">
+                            <option value="all">All Types</option>
+                            <option value="helmet">Helmet</option>
+                            <option value="red_light">Red Light</option>
+                            <option value="wrong_side">Wrong Side</option>
+                        </select>
+                    </label>
+                    <button id="refreshButton" class="ghost-button">Refresh Records</button>
+                </div>
+            </div>
+
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Evidence</th>
+                            <th>Number Plate</th>
+                            <th>Violation Type</th>
+                            <th>Timestamp</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="violationsTableBody">
+                        <tr>
+                            <td colspan="5" class="empty-state">Loading records...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <script src="/frontend/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+sqlalchemy>=2.0.30
+opencv-python==4.11.0.86
+ultralytics>=8.3.0
+pytesseract>=0.3.10
+numpy>=1.26.0,<2.0
+Pillow>=10.4.0

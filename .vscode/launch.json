@@ -1,0 +1,92 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Backend API",
+      "type": "python",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "backend.app:app",
+        "--reload"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Helmet Detection",
+      "type": "python",
+      "request": "launch",
+      "module": "detection.helmet_detection",
+      "args": [
+        "--video",
+        "${workspaceFolder}\\videos\\helmet_video.mp4"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Helmet Camera",
+      "type": "python",
+      "request": "launch",
+      "module": "detection.helmet_camera",
+      "args": [
+        "--camera",
+        "0",
+        "--show"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Red Light Detection",
+      "type": "python",
+      "request": "launch",
+      "module": "detection.red_light_detection",
+      "args": [
+        "--video",
+        "${workspaceFolder}\\videos\\red_light_video.mp4"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Red Light Camera",
+      "type": "python",
+      "request": "launch",
+      "module": "detection.red_light_camera",
+      "args": [
+        "--camera",
+        "0",
+        "--show"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Wrong Side Detection",
+      "type": "python",
+      "request": "launch",
+      "module": "detection.wrong_side_detection",
+      "args": [
+        "--video",
+        "${workspaceFolder}\\videos\\wrong_side_video.mp4"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Wrong Side Camera",
+      "type": "python",
+      "request": "launch",
+      "module": "detection.wrong_side_camera",
+      "args": [
+        "--camera",
+        "0",
+        "--show"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ]
+}
