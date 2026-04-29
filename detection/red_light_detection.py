@@ -19,6 +19,7 @@ from detection.utils import (
     CentroidTracker,
     FrameOutputManager,
     ViolationEventGate,
+    build_violation_image_path,
     crop_with_padding_and_offset,
     draw_label,
     estimate_plate_bbox,
@@ -26,8 +27,8 @@ from detection.utils import (
     open_video_capture,
     prepare_frame_for_inference,
     persist_violation,
+    relative_bbox,
     result_to_detections,
-    save_violation_image,
     scale_detections,
     setup_logger,
     update_violation_number_plate,
@@ -46,8 +47,81 @@ class RedLightViolationDetector:
         self.ocr = OCRProcessor(plate_detector_path=plate_detector_path)
         self.event_gate = ViolationEventGate(cooldown_frames=45)
         self.flagged_tracks: set[int] = set()
+        self.flagged_plate_boxes: dict[int, tuple[int, int, int, int]] = {}
         self.signal_state_cache: str | None = None
         self.save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="red_light_writer")
+
+    def _plate_focus_bbox(
+        self,
+        vehicle_bbox: tuple[int, int, int, int],
+        frame_shape: tuple[int, int, int],
+    ) -> tuple[int, int, int, int]:
+        return relative_bbox(
+            vehicle_bbox,
+            frame_shape,
+            x1_ratio=0.05,
+            y1_ratio=0.56,
+            x2_ratio=0.95,
+            y2_ratio=0.90,
+        )
+
+    def _fallback_plate_anchor_x(
+        self,
+        vehicle_bbox: tuple[int, int, int, int],
+        frame_shape: tuple[int, int, int],
+    ) -> float:
+        frame_width = frame_shape[1]
+        x1, _, x2, _ = vehicle_bbox
+        if x1 <= 5:
+            return 0.28
+        if x2 >= frame_width - 5:
+            return 0.72
+        return 0.50
+
+    def _preview_plate_bbox(
+        self,
+        source_frame,
+        vehicle_bbox: tuple[int, int, int, int],
+        track_id: int,
+    ) -> tuple[int, int, int, int]:
+        cached_bbox = self.flagged_plate_boxes.get(track_id)
+        if cached_bbox is not None:
+            return cached_bbox
+
+        focus_bbox = self._plate_focus_bbox(vehicle_bbox, source_frame.shape)
+        vehicle_crop, (crop_x, crop_y) = crop_with_padding_and_offset(source_frame, focus_bbox, padding=4)
+        plate_text, detected_bbox = self.ocr.extract_number_plate_details(vehicle_crop)
+        if detected_bbox is not None and plate_text != "UNKNOWN":
+            px1, py1, px2, py2 = detected_bbox
+            return (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
+
+        return estimate_plate_bbox(
+            vehicle_bbox,
+            source_frame.shape,
+            width_ratio=0.16,
+            height_ratio=0.10,
+            x_anchor=self._fallback_plate_anchor_x(vehicle_bbox, source_frame.shape),
+            y_anchor=0.78,
+        )
+
+    def _resolve_plate_details(
+        self,
+        source_frame,
+        vehicle_bbox: tuple[int, int, int, int],
+        fallback_plate_bbox: tuple[int, int, int, int],
+    ) -> tuple[str, tuple[int, int, int, int]]:
+        focus_bbox = self._plate_focus_bbox(vehicle_bbox, source_frame.shape)
+        vehicle_crop, (crop_x, crop_y) = crop_with_padding_and_offset(source_frame, focus_bbox, padding=4)
+        detected_bbox = self.ocr.find_number_plate_bbox(vehicle_crop)
+        plate, plate_bbox = self.ocr.extract_number_plate_details(vehicle_crop)
+        final_plate_bbox = fallback_plate_bbox
+        if detected_bbox is not None:
+            px1, py1, px2, py2 = detected_bbox
+            final_plate_bbox = (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
+        if plate_bbox is not None:
+            px1, py1, px2, py2 = plate_bbox
+            final_plate_bbox = (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
+        return plate, final_plate_bbox
 
     def _signal_state(self, frame_index: int, fps: float) -> str:
         elapsed_seconds = frame_index / fps if fps else 0
@@ -117,12 +191,7 @@ class RedLightViolationDetector:
         fallback_plate_bbox: tuple[int, int, int, int],
         track_id: int,
     ) -> None:
-        vehicle_crop, (crop_x, crop_y) = crop_with_padding_and_offset(source_frame, vehicle_bbox, padding=12)
-        plate, plate_bbox = self.ocr.extract_number_plate_details(vehicle_crop)
-        final_plate_bbox = fallback_plate_bbox
-        if plate_bbox is not None:
-            px1, py1, px2, py2 = plate_bbox
-            final_plate_bbox = (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
+        plate, final_plate_bbox = self._resolve_plate_details(source_frame, vehicle_bbox, fallback_plate_bbox)
         px1, py1, px2, py2 = final_plate_bbox
         cv2.rectangle(frame_snapshot, (px1, py1), (px2, py2), (50, 220, 255), 2)
         draw_label(frame_snapshot, f"Number Plate | {plate}", (px1, max(30, py1)), (50, 220, 255))
@@ -202,8 +271,8 @@ class RedLightViolationDetector:
         violations = 0
         is_camera_input = isinstance(video_path, int)
         fast_preview_mode = show and not is_camera_input
-        inference_max_width = 640 if show else 1180
-        inference_imgsz = 512 if show else 896
+        inference_max_width = 384 if show else 1180
+        inference_imgsz = 288 if show else 896
         source_frame_skip = 2 if fast_preview_mode else (1 if show else 0)
 
         while True:
@@ -214,7 +283,8 @@ class RedLightViolationDetector:
             original_frame = frame.copy()
             frame_height, frame_width = frame.shape[:2]
             stop_line_y = int(frame_height * line_ratio)
-            detected_signal_state = self._detect_signal_state_from_frame(original_frame)
+            should_refresh_signal = not show or frame_index % 2 == 0
+            detected_signal_state = self._detect_signal_state_from_frame(original_frame) if should_refresh_signal else None
             if detected_signal_state is not None:
                 self.signal_state_cache = detected_signal_state
             signal_state = detected_signal_state or self.signal_state_cache or self._signal_state(frame_index, fps)
@@ -252,27 +322,33 @@ class RedLightViolationDetector:
                     frame_height=frame_height,
                     approach_direction=approach_direction,
                 )
+                is_flagged = track["track_id"] in self.flagged_tracks
+                plate_display_bbox = None
 
-                color = (255, 200, 0)
+                color = (0, 0, 255) if is_flagged else (255, 200, 0)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                draw_label(frame, f"Vehicle ID {track['track_id']}", (x1, max(30, y1)), color)
+                draw_label(
+                    frame,
+                    "RED LIGHT" if is_flagged else f"Vehicle ID {track['track_id']}",
+                    (x1, max(30, y1)),
+                    color,
+                )
+                if is_flagged:
+                    plate_display_bbox = self._preview_plate_bbox(
+                        original_frame,
+                        track["bbox"],
+                        track["track_id"],
+                    )
+                    px1, py1, px2, py2 = plate_display_bbox
+                    cv2.rectangle(frame, (px1, py1), (px2, py2), (50, 220, 255), 2)
+                    draw_label(frame, "Number Plate", (px1, max(30, py1)), (50, 220, 255))
 
                 if len(bbox_history) < 2:
                     continue
 
-                if signal_state != "RED" or not crossed_line or track["track_id"] in self.flagged_tracks:
+                if signal_state != "RED" or not crossed_line or is_flagged:
                     continue
 
-                plate_display_bbox = estimate_plate_bbox(
-                    track["bbox"],
-                    frame.shape,
-                    width_ratio=0.40,
-                    height_ratio=0.12,
-                    y_anchor=0.72,
-                )
-                px1, py1, px2, py2 = plate_display_bbox
-                cv2.rectangle(frame, (px1, py1), (px2, py2), (50, 220, 255), 2)
-                draw_label(frame, "Number Plate", (px1, max(30, py1)), (50, 220, 255))
                 if self.event_gate.should_skip(
                     frame_index=frame_index,
                     bbox=track["bbox"],
@@ -282,11 +358,21 @@ class RedLightViolationDetector:
                 ):
                     continue
 
+                if plate_display_bbox is None:
+                    plate_display_bbox = self._preview_plate_bbox(
+                        original_frame,
+                        track["bbox"],
+                        track["track_id"],
+                    )
+                px1, py1, px2, py2 = plate_display_bbox
+                cv2.rectangle(frame, (px1, py1), (px2, py2), (50, 220, 255), 2)
+                draw_label(frame, "Number Plate", (px1, max(30, py1)), (50, 220, 255))
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
                 draw_label(frame, "RED LIGHT", (x1, max(30, y1)), (0, 0, 255))
                 self.flagged_tracks.add(track["track_id"])
+                self.flagged_plate_boxes[track["track_id"]] = plate_display_bbox
                 violation_frame = frame.copy()
-                image_path, absolute_image_path = save_violation_image(violation_frame, "red_light")
+                image_path, absolute_image_path = build_violation_image_path("red_light")
                 record_id = persist_violation("red_light", "UNKNOWN", image_path)
                 self.event_gate.record(
                     frame_index=frame_index,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -9,6 +10,7 @@ class Settings:
         self.base_dir = Path(__file__).resolve().parent
         self.backend_dir = self.base_dir / "backend"
         self.frontend_dir = self.base_dir / "frontend"
+        self.frontend_dist_dir = self.frontend_dir / "dist"
         self.models_dir = self.base_dir / "models"
         self.logs_dir = self.base_dir / "logs"
         self.detector_logs_dir = self.logs_dir / "detectors"
@@ -40,6 +42,10 @@ class Settings:
         self.helmet_video_path = self.videos_dir / "helmet_video.mp4"
         self.red_light_video_path = self.videos_dir / "red_light_video.mp4"
         self.wrong_side_video_path = self.videos_dir / "wrong_side_video.mp4"
+
+        self.auth_username = os.getenv("TVS_AUTH_USERNAME", "admin")
+        self.auth_password = os.getenv("TVS_AUTH_PASSWORD", "traffic123")
+        self.auth_cookie_name = "tvs_session"
 
         self.ensure_directories()
 

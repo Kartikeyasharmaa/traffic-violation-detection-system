@@ -27,10 +27,11 @@ from detection.utils import (
     open_video_capture,
     overlap_ratio,
     prepare_frame_for_inference,
+    build_violation_image_path,
     persist_violation,
     point_in_bbox,
     result_to_detections,
-    save_violation_image,
+    relative_bbox,
     scale_detections,
     setup_logger,
     update_violation_number_plate,
@@ -52,6 +53,7 @@ class HelmetViolationDetector:
         self.tracker = CentroidTracker(max_disappeared=15, max_distance=100, history_size=20)
         self.event_gate = ViolationEventGate(cooldown_frames=120)
         self.flagged_tracks: set[int] = set()
+        self.flagged_plate_boxes: dict[int, tuple[int, int, int, int]] = {}
         self.save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="helmet_writer")
         self.helmet_class_ids, self.no_helmet_class_ids = self._resolve_helmet_classes()
         self.plate_class_ids, self.rider_class_ids = self._resolve_auxiliary_classes()
@@ -164,6 +166,39 @@ class HelmetViolationDetector:
             return self._heuristic_helmet_present(frame, rider_bbox)
 
         return False
+
+    def _visible_face_without_helmet(
+        self,
+        frame,
+        rider_bbox: tuple[int, int, int, int],
+        helmet_head_bbox: Optional[tuple[int, int, int, int]],
+    ) -> Optional[tuple[int, int, int, int]]:
+        if helmet_head_bbox is not None or self.face_cascade is None:
+            return None
+
+        head_region = self._head_region(rider_bbox)
+        x1, y1, x2, y2 = head_region
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)
+        faces = self.face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.08,
+            minNeighbors=4,
+            minSize=(18, 18),
+        )
+        if len(faces) == 0:
+            return None
+
+        face_boxes: list[tuple[int, int, int, int]] = []
+        for fx, fy, fw, fh in faces:
+            face_boxes.append((x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh))
+
+        face_boxes.sort(key=lambda bbox: (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]), reverse=True)
+        return face_boxes[0]
 
     def _match_riders_to_bike(
         self,
@@ -355,6 +390,42 @@ class HelmetViolationDetector:
         y2 = max(bbox[3] for bbox in valid_boxes)
         return self._expand_bbox((x1, y1, x2, y2), frame_shape, padding_x=padding_x, padding_y=padding_y)
 
+    def _preview_plate_bbox(
+        self,
+        frame,
+        bike_bbox: tuple[int, int, int, int],
+        matched_plate_bbox: Optional[tuple[int, int, int, int]],
+        track_id: int,
+    ) -> tuple[int, int, int, int]:
+        cached_bbox = self.flagged_plate_boxes.get(track_id)
+        if cached_bbox is not None:
+            return cached_bbox
+
+        focus_bbox = relative_bbox(
+            bike_bbox,
+            frame.shape,
+            x1_ratio=0.22,
+            y1_ratio=0.56,
+            x2_ratio=0.78,
+            y2_ratio=0.90,
+        )
+        focus_crop, (crop_x, crop_y) = crop_with_padding_and_offset(frame, focus_bbox, padding=4)
+        plate_text, detected_bbox = self.ocr.extract_number_plate_details(focus_crop)
+        if detected_bbox is not None and plate_text != "UNKNOWN":
+            px1, py1, px2, py2 = detected_bbox
+            return (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
+
+        if matched_plate_bbox is not None:
+            return matched_plate_bbox
+
+        return estimate_plate_bbox(
+            bike_bbox,
+            frame.shape,
+            width_ratio=0.24,
+            height_ratio=0.10,
+            y_anchor=0.74,
+        )
+
     def _resolve_plate_for_bike(
         self,
         frame,
@@ -365,22 +436,35 @@ class HelmetViolationDetector:
         absolute_bbox: Optional[tuple[int, int, int, int]] = None
 
         if matched_plate_bbox is not None:
-            absolute_bbox = matched_plate_bbox
             for candidate_bbox in (
-                absolute_bbox,
-                self._expand_bbox(absolute_bbox, frame.shape, padding_x=10, padding_y=6),
+                matched_plate_bbox,
+                self._expand_bbox(matched_plate_bbox, frame.shape, padding_x=10, padding_y=6),
             ):
                 x1, y1, x2, y2 = candidate_bbox
                 crop = frame[y1:y2, x1:x2]
                 plate_text, _ = self.ocr.extract_number_plate_details(crop)
                 plate_candidates.append(plate_text)
 
-        bike_crop, (crop_x, crop_y) = crop_with_padding_and_offset(frame, bike_bbox, padding=16)
+        focus_bbox = relative_bbox(
+            bike_bbox,
+            frame.shape,
+            x1_ratio=0.22,
+            y1_ratio=0.56,
+            x2_ratio=0.78,
+            y2_ratio=0.90,
+        )
+        bike_crop, (crop_x, crop_y) = crop_with_padding_and_offset(frame, focus_bbox, padding=4)
+        detected_plate_bbox = self.ocr.find_number_plate_bbox(bike_crop)
+        if detected_plate_bbox is not None:
+            px1, py1, px2, py2 = detected_plate_bbox
+            absolute_bbox = (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
         plate_text, plate_bbox = self.ocr.extract_number_plate_details(bike_crop)
         plate_candidates.append(plate_text)
-        if absolute_bbox is None and plate_bbox is not None:
+        if plate_bbox is not None:
             px1, py1, px2, py2 = plate_bbox
             absolute_bbox = (crop_x + px1, crop_y + py1, crop_x + px2, crop_y + py2)
+        elif absolute_bbox is None and matched_plate_bbox is not None:
+            absolute_bbox = matched_plate_bbox
 
         return self._choose_best_plate(plate_candidates), absolute_bbox
 
@@ -409,9 +493,9 @@ class HelmetViolationDetector:
         fast_preview_mode = preview_mode and not is_camera_input
         use_person_detector = not (self.helmet_model is not None and self.rider_class_ids)
         vehicle_classes = [settings.motorcycle_class] if not use_person_detector else [settings.person_class, settings.motorcycle_class]
-        inference_max_width = 400 if fast_preview_mode else (480 if preview_mode else 880)
-        inference_imgsz = 384 if fast_preview_mode else (448 if preview_mode else 768)
-        source_frame_skip = 5 if fast_preview_mode else (1 if is_camera_input and preview_mode else 0)
+        inference_max_width = 320 if fast_preview_mode else (384 if preview_mode else 880)
+        inference_imgsz = 256 if fast_preview_mode else (320 if preview_mode else 768)
+        source_frame_skip = 4 if fast_preview_mode else (2 if is_camera_input and preview_mode else 0)
 
         while True:
             success, frame = capture.read()
@@ -487,8 +571,12 @@ class HelmetViolationDetector:
                     no_helmet_head_bbox = self._find_detection_in_region(head_bbox, no_helmet_detections)
                     helmet_head_bbox = self._find_detection_in_region(head_bbox, helmet_detections)
                     explicit_no_helmet = no_helmet_head_bbox is not None
-                    has_helmet = self._rider_has_helmet(frame, rider_bbox, helmet_detections)
-                    head_display_bbox = no_helmet_head_bbox or helmet_head_bbox or head_bbox
+                    visible_face_bbox = self._visible_face_without_helmet(
+                        original_frame,
+                        rider_bbox,
+                        helmet_head_bbox,
+                    )
+                    head_display_bbox = no_helmet_head_bbox or visible_face_bbox or helmet_head_bbox or head_bbox
 
                     if any(
                         overlap_ratio(head_display_bbox, existing) >= 0.45 or overlap_ratio(existing, head_display_bbox) >= 0.45
@@ -496,39 +584,44 @@ class HelmetViolationDetector:
                     ):
                         continue
 
-                    if explicit_no_helmet or not has_helmet:
+                    if explicit_no_helmet or visible_face_bbox is not None:
                         violating_head_boxes.append(head_display_bbox)
 
                 violating_head_boxes = self._dedupe_bboxes(violating_head_boxes)
-                for rider_index, head_bbox in enumerate(violating_head_boxes, start=1):
+                for head_bbox in violating_head_boxes:
                     cv2.rectangle(frame, head_bbox[:2], head_bbox[2:], (0, 0, 255), 2)
-                    draw_label(frame, f"No Helmet Rider {rider_index}", (head_bbox[0], max(30, head_bbox[1])), (0, 0, 255))
 
                 matched_plate = self._match_plate_to_bike(plate_detections, bike_bbox)
                 matched_plate_bbox = matched_plate["bbox"] if matched_plate is not None else None
                 group_bbox = self._combine_bboxes(
-                    [bike_bbox] + [rider["bbox"] for rider in matched_riders] + violating_head_boxes,
+                    [bike_bbox] + violating_head_boxes,
                     frame.shape,
                     padding_x=20,
                     padding_y=18,
                 ) or bike_bbox
+                plate_display_bbox = self._preview_plate_bbox(
+                    original_frame,
+                    bike_bbox,
+                    matched_plate_bbox,
+                    track_id,
+                )
 
                 if not violating_head_boxes:
                     continue
 
+                is_flagged = track_id in self.flagged_tracks
                 cv2.rectangle(frame, group_bbox[:2], group_bbox[2:], (0, 0, 255), 2)
-                plate_display_bbox = matched_plate_bbox or estimate_plate_bbox(
-                    group_bbox,
-                    frame.shape,
-                    width_ratio=0.34,
-                    height_ratio=0.11,
-                    y_anchor=0.74,
-                )
                 px1, py1, px2, py2 = plate_display_bbox
                 cv2.rectangle(frame, (px1, py1), (px2, py2), (50, 220, 255), 2)
                 draw_label(frame, "Number Plate", (px1, max(30, py1)), (50, 220, 255))
+                draw_label(
+                    frame,
+                    f"Bike {track_id} | No Helmet Riders: {len(violating_head_boxes)}",
+                    (group_bbox[0], max(30, group_bbox[1])),
+                    (0, 0, 255),
+                )
 
-                if track_id in self.flagged_tracks:
+                if is_flagged:
                     continue
 
                 if self.event_gate.should_skip(
@@ -539,16 +632,11 @@ class HelmetViolationDetector:
                 ):
                     continue
 
-                draw_label(
-                    frame,
-                    f"Bike {track_id} | No Helmet Riders: {len(violating_head_boxes)}",
-                    (group_bbox[0], max(30, group_bbox[1])),
-                    (0, 0, 255),
-                )
                 violation_frame = frame.copy()
-                image_path, absolute_image_path = save_violation_image(violation_frame, "helmet")
+                image_path, absolute_image_path = build_violation_image_path("helmet")
                 record_id = persist_violation("helmet", "UNKNOWN", image_path)
                 self.flagged_tracks.add(track_id)
+                self.flagged_plate_boxes[track_id] = plate_display_bbox
                 self.event_gate.record(
                     frame_index=frame_index,
                     bbox=group_bbox,

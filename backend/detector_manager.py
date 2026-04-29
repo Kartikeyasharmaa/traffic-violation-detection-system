@@ -166,6 +166,54 @@ class DetectorManager:
             self.logger.info("Started %s detector with pid=%s", detector_type, process.pid)
             return self._status_from_record(record, running=True, already_running=False)
 
+    def stop(self, detector_type: str) -> dict[str, object]:
+        if detector_type not in VALID_DETECTORS:
+            raise ValueError(f"Unsupported detector: {detector_type}")
+
+        with self._lock:
+            self._cleanup_finished_locked()
+            record = self._processes.get(detector_type)
+            if record is None or record.process.poll() is not None:
+                if record is not None:
+                    try:
+                        record.log_handle.close()
+                    except Exception:
+                        pass
+                    self._processes.pop(detector_type, None)
+                return {
+                    "detector_type": detector_type,
+                    "running": False,
+                    "pid": None,
+                    "started_at": None,
+                    "log_path": None,
+                    "already_running": False,
+                }
+
+            process = record.process
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.logger.warning("Detector %s did not stop in time; killing pid=%s", detector_type, process.pid)
+                process.kill()
+                process.wait(timeout=5)
+            finally:
+                try:
+                    record.log_handle.close()
+                except Exception:
+                    pass
+                self._processes.pop(detector_type, None)
+
+            self.logger.info("Stopped %s detector with pid=%s", detector_type, process.pid)
+            return {
+                "detector_type": detector_type,
+                "running": False,
+                "pid": None,
+                "started_at": None,
+                "log_path": str(record.log_path),
+                "already_running": False,
+            }
+
     def list_statuses(self) -> list[dict[str, object]]:
         with self._lock:
             self._cleanup_finished_locked()

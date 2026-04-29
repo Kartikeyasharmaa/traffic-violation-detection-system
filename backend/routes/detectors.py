@@ -24,3 +24,14 @@ def start_detector(detector_type: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not start {detector_type} detector: {exc}") from exc
+
+
+@router.post("/detectors/{detector_type}/stop")
+def stop_detector(detector_type: str) -> dict[str, object]:
+    if detector_type not in VALID_DETECTORS:
+        raise HTTPException(status_code=404, detail="Detector not found")
+
+    try:
+        return detector_manager.stop(detector_type)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not stop {detector_type} detector: {exc}") from exc

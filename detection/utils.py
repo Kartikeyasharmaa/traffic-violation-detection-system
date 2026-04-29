@@ -110,6 +110,7 @@ def estimate_plate_bbox(
     *,
     width_ratio: float = 0.44,
     height_ratio: float = 0.14,
+    x_anchor: float = 0.50,
     y_anchor: float = 0.70,
 ) -> tuple[int, int, int, int]:
     frame_height, frame_width = frame_shape[:2]
@@ -119,7 +120,7 @@ def estimate_plate_bbox(
 
     plate_width = max(28, int(box_width * width_ratio))
     plate_height = max(14, int(box_height * height_ratio))
-    center_x = int((x1 + x2) / 2)
+    center_x = int(x1 + box_width * x_anchor)
     center_y = int(y1 + box_height * y_anchor)
 
     px1 = max(0, center_x - plate_width // 2)
@@ -127,6 +128,32 @@ def estimate_plate_bbox(
     px2 = min(frame_width, px1 + plate_width)
     py2 = min(frame_height, py1 + plate_height)
     return (px1, py1, px2, py2)
+
+
+def relative_bbox(
+    bbox: tuple[int, int, int, int],
+    frame_shape: tuple[int, int, int] | tuple[int, int],
+    *,
+    x1_ratio: float,
+    y1_ratio: float,
+    x2_ratio: float,
+    y2_ratio: float,
+) -> tuple[int, int, int, int]:
+    frame_height, frame_width = frame_shape[:2]
+    bx1, by1, bx2, by2 = bbox
+    box_width = max(1, bx2 - bx1)
+    box_height = max(1, by2 - by1)
+
+    rx1 = max(0.0, min(x1_ratio, 1.0))
+    ry1 = max(0.0, min(y1_ratio, 1.0))
+    rx2 = max(rx1, min(x2_ratio, 1.0))
+    ry2 = max(ry1, min(y2_ratio, 1.0))
+
+    x1 = max(0, min(frame_width, int(bx1 + box_width * rx1)))
+    y1 = max(0, min(frame_height, int(by1 + box_height * ry1)))
+    x2 = max(x1 + 1, min(frame_width, int(bx1 + box_width * rx2)))
+    y2 = max(y1 + 1, min(frame_height, int(by1 + box_height * ry2)))
+    return (x1, y1, x2, y2)
 
 
 def overlap_ratio(box_a: tuple[int, int, int, int], box_b: tuple[int, int, int, int]) -> float:
@@ -163,7 +190,7 @@ def point_in_bbox(point: tuple[int, int], bbox: tuple[int, int, int, int]) -> bo
     return x1 <= x <= x2 and y1 <= y <= y2
 
 
-def save_violation_image(frame: np.ndarray, violation_type: str) -> tuple[str, Path]:
+def build_violation_image_path(violation_type: str) -> tuple[str, Path]:
     if violation_type not in settings.valid_violation_types:
         raise ValueError(f"Unsupported violation type: {violation_type}")
 
@@ -171,8 +198,13 @@ def save_violation_image(frame: np.ndarray, violation_type: str) -> tuple[str, P
     relative_path = Path(violation_type) / filename
     absolute_path = settings.image_dir / relative_path
     absolute_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(absolute_path), frame)
     return relative_path.as_posix(), absolute_path
+
+
+def save_violation_image(frame: np.ndarray, violation_type: str) -> tuple[str, Path]:
+    relative_path, absolute_path = build_violation_image_path(violation_type)
+    cv2.imwrite(str(absolute_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return relative_path, absolute_path
 
 
 def build_output_video_path(video_path: str | Path, violation_type: str) -> Path:
@@ -321,8 +353,18 @@ class FrameOutputManager:
                 except cv2.error:
                     pass
                 self.window_ready = True
+            else:
+                try:
+                    visible = cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE)
+                    if visible < 1:
+                        self.logger.info("Preview window closed by user for %s", self.window_name)
+                        return True
+                except cv2.error:
+                    self.logger.info("Preview window no longer available for %s", self.window_name)
+                    return True
             cv2.imshow(self.window_name, display_frame)
-            return (cv2.waitKey(1) & 0xFF) == ord("q")
+            key = cv2.waitKey(1) & 0xFF
+            return key in (ord("q"), 27)
         except cv2.error as exc:
             self.logger.warning(
                 "OpenCV GUI display is unavailable on this system. Continuing without a live window. %s",
